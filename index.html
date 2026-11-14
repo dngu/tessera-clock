@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera Clock</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #040405; }
+  body:not(.ui) { cursor: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  #panel {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 20px;
+    max-width: calc(100vw - 32px); padding: 10px 14px; border-radius: 12px;
+    background: rgba(18,18,18,.82); color: #d8d6d0;
+    font: 11px/1 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    letter-spacing: .06em; text-transform: uppercase;
+    opacity: 0; pointer-events: none; transition: opacity .35s;
+  }
+  body.ui #panel { opacity: 1; pointer-events: auto; }
+  #panel .group { display: flex; align-items: center; gap: 8px; }
+  #panel .name { opacity: .55; }
+  #panel button {
+    font: inherit; letter-spacing: inherit; text-transform: inherit;
+    color: inherit; background: transparent; border: 1px solid rgba(255,255,255,.18);
+    padding: 6px 9px; border-radius: 7px; cursor: pointer;
+  }
+  #panel button + button { margin-left: -4px; }
+  #panel button[aria-pressed="true"] { background: #e9e7e1; color: #141414; border-color: #e9e7e1; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel"></div>
+<script>
+// ─── Tuning ──────────────────────────────────────────────────────────
+const TUNE = {
+  handLen:      0.40,   // hand length as a fraction of clock pitch. Below 0.5,
+                        // so neighbouring hands never touch: every stroke of a
+                        // numeral is a separate bar with a visible gap.
+  handWeight:   0.070,  // hand thickness as a fraction of clock pitch
+  faceRadius:   0.47,   // clock-face recess
+  recessDepth:  0.045,  // how deep the faces look, as a fraction of clock pitch
+  shadowOffset: 0.9,    // hand shadow offset, in hand widths
+  shadowBlur:   1.6,    // hand shadow softness, in hand widths
+
+  springK:      13,     // motor stiffness
+  maxSpeed:     2.3,    // rad/s — motors have a top speed, like real steppers
+
+  timeHold:     16,     // seconds the time stays readable
+  patternHold:  11,     // seconds per abstract movement
+  ripple:       0.10,   // s per clock of distance: patterns spread from a point
+  sweep:        0.13,   // s per column: numerals assemble left to right
+  jitter:       0.45,   // s of per-clock randomness, so hands settle one by one
+};
+const SPRING_C = 2 * Math.sqrt(TUNE.springK);   // critically damped: no overshoot
+
+const TAU = Math.PI * 2;
+const U = 0, R = Math.PI * 0.5, D = Math.PI, L = Math.PI * 1.5;
+
+// ─── Numerals ────────────────────────────────────────────────────────
+// Each character is one clock: the two hands point along the strokes drawn.
+// A space is a clock the numeral doesn't use — it stays with the pattern
+// around it. Hands have only two directions, so T-junctions are implied by
+// the neighbouring clock rather than drawn.
+const GLYPH = {
+  '┌': [R, D], '┐': [L, D], '└': [U, R], '┘': [U, L], '│': [U, D], '─': [L, R],
+  '╶': [R, R], '╴': [L, L], '╵': [U, U], '╷': [D, D],
+};
+const FONTS = {
+  // 2 × 3 clocks per numeral
+  compact: { w: 2, h: 3, glyphs: {
+    0: ['┌┐', '││', '└┘'],   1: [' ╷', ' │', ' ╵'],   2: ['╶┐', '┌┘', '└╴'],
+    3: ['╶┐', '╶┘', '╶┘'],   4: ['╷╷', '└│', ' ╵'],   5: ['┌╴', '└┐', '╶┘'],
+    6: ['┌╴', '│┐', '└┘'],   7: ['╶┐', ' │', ' ╵'],   8: ['┌┐', '└┘', '└┘'],
+    9: ['┌┐', '└│', '╶┘'],
+  }},
+  // 3 × 5 clocks per numeral
+  dense: { w: 3, h: 5, glyphs: {
+    0: ['┌─┐', '│ │', '│ │', '│ │', '└─┘'],
+    1: ['  ╷', '  │', '  │', '  │', '  ╵'],
+    2: ['╶─┐', '  │', '┌─┘', '│  ', '└─╴'],
+    3: ['╶─┐', '  │', '╶─┘', '  │', '╶─┘'],
+    4: ['╷ ╷', '│ │', '└─│', '  │', '  ╵'],
+    5: ['┌─╴', '│  ', '└─┐', '  │', '╶─┘'],
+    6: ['┌─╴', '│  ', '│─┐', '│ │', '└─┘'],
+    7: ['╶─┐', '  │', '  │', '  │', '  ╵'],
+    8: ['┌─┐', '│ │', '│─│', '│ │', '└─┘'],
+    9: ['┌─┐', '│ │', '└─│', '  │', '╶─┘'],
+  }},
+};
+
+// ─── Varieties ───────────────────────────────────────────────────────
+const VARIETIES = {
+  shape: { label: 'Shape', key: 'p', options: {
+    alternate: { label: 'Alternate' },   // switches on every page load
+    round:     { label: 'Round' },
+    panel:     { label: 'Wide panel' },
+  }},
+  grid: { label: 'Round grid', key: 'g', options: {
+    compact: { label: 'Compact', n: 9,  font: 'compact', columns: [0, 2, 5, 7] },
+    dense:   { label: 'Dense',   n: 15, font: 'dense',   columns: [0, 4, 8, 12] },
+  }},
+  surface: { label: 'Surface', key: 's', options: {
+    noir:    { label: 'Noir',    wall: '#040405', disc: ['#19191c', '#0d0d0f'], rim: 'rgba(0,0,0,.9)',
+               face: 'rgba(255,255,255,.10)', well: 'rgba(0,0,0,.22)', inner: 'rgba(0,0,0,.95)', hand: '#f3f1ea', cast: 'rgba(0,0,0,.95)' },
+    plaster: { label: 'Plaster', wall: '#e6e5e2', disc: ['#bcbcba', '#a8a8a6'], rim: 'rgba(0,0,0,.30)',
+               face: 'rgba(255,255,255,.45)', well: 'rgba(0,0,0,.05)', inner: 'rgba(0,0,0,.45)', hand: '#0c0c0d', cast: 'rgba(0,0,0,.38)' },
+    bone:    { label: 'Bone',    wall: '#24231f', disc: ['#f1eee6', '#dedacf'], rim: 'rgba(0,0,0,.65)',
+               face: 'rgba(255,255,255,.9)', well: 'rgba(0,0,0,.035)', inner: 'rgba(0,0,0,.30)', hand: '#161513', cast: 'rgba(0,0,0,.30)' },
+  }},
+  around: { label: 'Around the time', key: 'a', options: {
+    still: { label: 'Still' },      // surrounding hands rest on one diagonal
+    drift: { label: 'Drifting' },   // a slow swell keeps passing through them
+  }},
+};
+const settings = {};
+{
+  const params = new URLSearchParams(location.search);
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('tessera') || '{}'); } catch (e) {}
+  for (const k in VARIETIES) {
+    const opts = VARIETIES[k].options;
+    const want = params.get(k) || saved[k];
+    settings[k] = want in opts ? want : Object.keys(opts)[0];
+  }
+}
+const opt = k => VARIETIES[k].options[settings[k]];
+
+// "Alternate" picks the other shape from last time, once per page load.
+let panel = false;
+function resolveShape() {
+  if (settings.shape !== 'alternate') { panel = settings.shape === 'panel'; return; }
+  let last = 'panel';
+  try { last = localStorage.getItem('tesseraShape') || 'panel'; } catch (e) {}
+  panel = last !== 'panel';
+  try { localStorage.setItem('tesseraShape', panel ? 'panel' : 'round'); } catch (e) {}
+}
+resolveShape();
+
+// ─── Wide panel ──────────────────────────────────────────────────────
+// Block numerals: solid seven-segment shapes on a 3×5 bitmap, drawn as the
+// outline of the filled blocks. The bitmap's corners are the clock centres,
+// so each numeral is 4 × 6 clocks and every hand is horizontal or vertical.
+const BLOCKS = [
+  ['111','101','101','101','111'], ['001','001','001','001','001'], ['111','001','111','100','111'],
+  ['111','001','111','001','111'], ['101','101','111','001','001'], ['111','100','111','001','111'],
+  ['111','100','111','101','111'], ['111','001','001','001','001'], ['111','101','111','101','111'],
+  ['111','101','111','001','111'],
+].map(bitmap => {
+  const on = (r, c) => r >= 0 && r < 5 && c >= 0 && c < 3 && bitmap[r][c] === '1';
+  const out = [];
+  for (let r = 0; r < 6; r++) {
+    out[r] = [];
+    for (let c = 0; c < 4; c++) {
+      const dirs = [];
+      if (on(r-1, c-1) !== on(r-1, c)) dirs.push(U);
+      if (on(r-1, c)   !== on(r,   c)) dirs.push(R);
+      if (on(r,   c-1) !== on(r,   c)) dirs.push(D);
+      if (on(r-1, c-1) !== on(r, c-1)) dirs.push(L);
+      out[r][c] = dirs.length === 2 ? dirs : null;
+    }
+  }
+  return out;
+});
+const PANEL = { rows: 8, digitColumns: [0, 5, 10, 15], digitsWidth: 19, minCols: 21, handLen: 0.47 };
+function panelCols() {
+  let c = Math.round(PANEL.rows * canvas.width / Math.max(1, canvas.height));
+  if (c % 2 === 0) c--;            // odd, so the numerals sit dead centre
+  return Math.max(PANEL.minCols, c);
+}
+
+// ─── Clocks ──────────────────────────────────────────────────────────
+function wrap(x) { x %= TAU; if (x > Math.PI) x -= TAU; else if (x < -Math.PI) x += TAU; return x; }
+
+class Hand {
+  constructor(a) { this.pos = a; this.vel = 0; }
+  step(target, dt) {
+    const acc = TUNE.springK * wrap(target - this.pos) - SPRING_C * this.vel;
+    this.vel = Math.max(-TUNE.maxSpeed, Math.min(TUNE.maxSpeed, this.vel + acc * dt));
+    this.pos += this.vel * dt;
+  }
+}
+
+let N = 0, COLS = 0, ROWS = 0, clocks = [];
+
+// A square grid of clocks, cropped to the circular face.
+function buildGrid(t) {
+  if (panel) {
+    COLS = panelCols(); ROWS = PANEL.rows;
+    clocks = [];
+    for (let gy = 0; gy < ROWS; gy++)
+      for (let gx = 0; gx < COLS; gx++) {
+        const x = gx - (COLS - 1) / 2, y = gy - (ROWS - 1) / 2;
+        const c = { gx, gy, x, y, rr: Math.hypot(x, y), a: Math.atan2(x, -y), fn: rest, next: null, switchAt: 0 };
+        const [h, m] = rest(c, t);
+        c.h = new Hand(h); c.m = new Hand(m);
+        clocks.push(c);
+      }
+    return;
+  }
+  N = opt('grid').n; COLS = N; ROWS = N;
+  const mid = (N - 1) / 2, reach = (N / 2 - 0.1) ** 2;
+  clocks = [];
+  for (let gy = 0; gy < N; gy++) {
+    for (let gx = 0; gx < N; gx++) {
+      const x = gx - mid, y = gy - mid;
+      if (x * x + y * y > reach) continue;
+      const c = { gx, gy, x, y, rr: Math.hypot(x, y), a: Math.atan2(x, -y),   // a: outward, clockwise from up
+                  fn: rest, next: null, switchAt: 0 };
+      const [h, m] = rest(c, t);
+      c.h = new Hand(h); c.m = new Hand(m);
+      clocks.push(c);
+    }
+  }
+}
+
+// ─── Movements ───────────────────────────────────────────────────────
+// A movement gives every clock its two hand angles as a continuous function
+// of position and time, so the whole face keeps flowing while it is shown.
+
+// Chevrons aimed at the centre, opening and closing in rings.
+function chevrons(c, t) {
+  const open = 0.25 + 1.15 * (0.5 + 0.5 * Math.sin(t * 0.5 - c.rr * 0.55));
+  return [c.a + Math.PI - open, c.a + Math.PI + open];
+}
+// Concentric circles that twist as a wave travels outward.
+function rings(c, t) {
+  const twist = 0.7 * Math.sin(t * 0.45 - c.rr * 0.6);
+  return [c.a + R + twist, c.a - R + twist];
+}
+// Straight bars turning in sequence: a wave rolling across the face.
+function wave(c, t) {
+  const th = t * 0.32 + c.x * 0.30 + 0.35 * Math.sin(c.y * 0.5 + t * 0.4);
+  return [th, th + Math.PI];
+}
+// Right angles, alternate clocks counter-rotating.
+function weave(c, t) {
+  const dir = (c.gx + c.gy) & 1 ? 1 : -1;
+  const th = dir * t * 0.30 + (c.x + c.y) * Math.PI * 0.25;
+  return [th, th + R];
+}
+// What the clocks around the numerals do: both hands on one diagonal.
+function rest(c, t) {
+  const th = Math.PI * 0.25 +
+    (settings.around === 'drift' ? 0.24 * Math.sin(t * 0.55 - (c.x + c.y) * 0.45) : 0);
+  return [th, th];
+}
+
+const PROGRAMME = [[chevrons, rings], [wave, weave], [rings, wave], [weave, chevrons]];
+
+// ─── Time ────────────────────────────────────────────────────────────
+function timeString() {
+  const now = new Date();
+  return String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
+}
+
+// A movement in which the clocks under each numeral hold its strokes and
+// every other clock keeps to the resting pattern.
+function timeMovement(str) {
+  if (panel) {
+    const cells = new Map(), left = (COLS - PANEL.digitsWidth) / 2, n = COLS;
+    for (let i = 0; i < 4; i++) {
+      const digit = BLOCKS[str[i]];
+      for (let r = 0; r < 6; r++)
+        for (let k = 0; k < 4; k++)
+          if (digit[r][k]) cells.set((1 + r) * n + left + PANEL.digitColumns[i] + k, digit[r][k]);
+    }
+    return (c, t) => cells.get(c.gy * n + c.gx) || rest(c, t);
+  }
+  const g = opt('grid'), font = FONTS[g.font];
+  const top = (N - font.h) / 2;
+  const cells = new Map();
+  for (let i = 0; i < 4; i++) {
+    const rows = font.glyphs[str[i]];
+    for (let r = 0; r < font.h; r++)
+      for (let k = 0; k < font.w; k++) {
+        const pair = GLYPH[rows[r][k]];
+        if (pair) cells.set((top + r) * N + g.columns[i] + k, pair);
+      }
+  }
+  return (c, t) => cells.get(c.gy * N + c.gx) || rest(c, t);
+}
+
+// ─── Sequencing ──────────────────────────────────────────────────────
+// Hands never jump: a new movement is handed to each clock at its own
+// moment, and the motor then travels there. Numerals therefore assemble out
+// of whatever was moving before, and dissolve back into what comes next.
+let phase = 'time', phaseEnd = 0, setIndex = 0, stepIndex = 0, shownTime = '';
+
+function handOver(fn, t, delayOf) {
+  for (const c of clocks) {
+    c.next = fn;
+    c.switchAt = t + delayOf(c) + Math.random() * TUNE.jitter;
+  }
+}
+function showTime(t) {
+  shownTime = timeString();
+  handOver(timeMovement(shownTime), t, c => (c.x + COLS / 2) * TUNE.sweep);
+  phase = 'time'; phaseEnd = t + TUNE.timeHold;
+}
+function showPattern(t) {
+  const origin = clocks[Math.floor(Math.random() * clocks.length)];
+  handOver(PROGRAMME[setIndex % PROGRAMME.length][stepIndex], t,
+           c => Math.hypot(c.x - origin.x, c.y - origin.y) * TUNE.ripple);
+  phase = 'pattern'; phaseEnd = t + TUNE.patternHold;
+}
+function advance(t) {
+  if (phase === 'time') {
+    if (t >= phaseEnd) { stepIndex = 0; showPattern(t); }
+    else if (timeString() !== shownTime) { const end = phaseEnd; showTime(t); phaseEnd = Math.max(end, t + 6); }
+  } else if (t >= phaseEnd) {
+    stepIndex++;
+    if (stepIndex < PROGRAMME[setIndex % PROGRAMME.length].length) showPattern(t);
+    else { setIndex++; showTime(t); }
+  }
+}
+
+// ─── Drawing ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let dpr = 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(window.innerWidth * dpr);
+  canvas.height = Math.round(window.innerHeight * dpr);
+}
+window.addEventListener('resize', resize);
+
+const bg = document.createElement('canvas');
+let bgKey = '';
+
+function paintBackground(layer, W, H, s, pitch, board, cx0, cy0) {
+  layer.width = W; layer.height = H;
+  const g = layer.getContext('2d');
+  g.fillStyle = s.wall;
+  g.fillRect(0, 0, W, H);
+
+  // The disc, lit from above, standing a little proud of the wall
+  // (a disc, or for the wide panel a rectangle with softly rounded corners)
+  const grad = g.createLinearGradient(0, cy0 - board.h / 2, 0, cy0 + board.h / 2);
+  grad.addColorStop(0, s.disc[0]); grad.addColorStop(1, s.disc[1]);
+  g.save();
+  g.shadowColor = s.rim; g.shadowBlur = pitch * 0.55; g.shadowOffsetY = pitch * 0.14;
+  g.fillStyle = grad;
+  g.beginPath();
+  if (panel) g.roundRect(cx0 - board.w / 2, cy0 - board.h / 2, board.w, board.h, pitch * 0.12);
+  else g.arc(cx0, cy0, board.w / 2, 0, TAU);
+  g.fill();
+  g.restore();
+
+  // Clock faces, milled a little way into the disc: a slightly darker floor,
+  // a shadow under the upper-left wall, and light catching the lower-right lip.
+  const r = pitch * TUNE.faceRadius, depth = pitch * TUNE.recessDepth;
+  for (const c of clocks) {
+    const cx = cx0 + c.x * pitch, cy = cy0 + c.y * pitch;
+    g.save();
+    g.beginPath(); g.arc(cx, cy, r, 0, TAU); g.clip();
+    g.fillStyle = s.well; g.fillRect(cx - r, cy - r, r * 2, r * 2);
+    // Fill everything outside the circle; its shadow falls inside the rim.
+    g.beginPath(); g.rect(cx - r * 3, cy - r * 3, r * 6, r * 6); g.arc(cx, cy, r, 0, TAU, true);
+    g.shadowColor = s.inner; g.shadowBlur = depth * 2.2;
+    g.shadowOffsetX = depth * 0.6; g.shadowOffsetY = depth;
+    g.fillStyle = '#000'; g.fill();
+    g.restore();
+    g.beginPath(); g.arc(cx, cy, r, Math.PI * -0.15, Math.PI * 0.85);
+    g.strokeStyle = s.face; g.lineWidth = Math.max(1, pitch * 0.012); g.stroke();
+  }
+}
+
+function draw() {
+  const W = canvas.width, H = canvas.height, s = opt('surface');
+  if (panel && panelCols() !== COLS) { buildGrid(now); showTime(now); }   // window changed shape
+  const cx0 = W / 2, cy0 = H / 2;
+  let pitch, board;
+  if (panel) {
+    pitch = Math.min(W * 0.96 / (COLS + 0.5), H * 0.86 / (ROWS + 0.5));
+    board = { w: (COLS + 0.5) * pitch, h: (ROWS + 0.5) * pitch };
+  } else {
+    pitch = Math.min(W, H) * 0.90 / (N + 1.7);
+    const d = (N + 1.7) * pitch;
+    board = { w: d, h: d };
+  }
+
+  // The disc and its recessed faces never move, so they're drawn once into a
+  // cached layer and redrawn only when the size, grid or surface changes.
+  const key = `${W}x${H}:${panel}:${COLS}:${settings.surface}`;
+  if (bgKey !== key) { bgKey = key; paintBackground(bg, W, H, s, pitch, board, cx0, cy0); }
+  ctx.drawImage(bg, 0, 0);
+
+  // Hands: flat-ended bars with a short tail past the pivot. They stand off
+  // the disc, so each casts a soft shadow down and to the right, as if lit
+  // from the upper left.
+  const len = pitch * (panel ? PANEL.handLen : TUNE.handLen), w = Math.max(pitch * TUNE.handWeight, 1.5 * dpr), tail = w / 2;
+  ctx.beginPath();
+  for (const c of clocks) {
+    const cx = cx0 + c.x * pitch, cy = cy0 + c.y * pitch;
+    for (const hand of [c.h, c.m]) {
+      const sx = Math.sin(hand.pos), sy = -Math.cos(hand.pos);
+      ctx.moveTo(cx - sx * tail, cy - sy * tail);
+      ctx.lineTo(cx + sx * len, cy + sy * len);
+    }
+  }
+  ctx.save();
+  ctx.shadowColor = s.cast;
+  ctx.shadowOffsetX = w * TUNE.shadowOffset;
+  ctx.shadowOffsetY = w * TUNE.shadowOffset * 1.4;
+  ctx.shadowBlur = w * TUNE.shadowBlur;
+  ctx.lineCap = 'butt'; ctx.lineWidth = w; ctx.strokeStyle = s.hand;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ─── Loop ────────────────────────────────────────────────────────────
+// The installation runs on its own clock, `now`, which only moves forward in
+// small fixed steps. A slow or throttled frame (a background tab, a busy
+// machine) therefore catches up smoothly instead of stalling or jumping.
+// `?warp=20` starts that many seconds in — handy for stills.
+const query = new URLSearchParams(location.search);
+let now = 0, lastT = null;
+function frame(ms) {
+  const t = ms / 1000;
+  let elapsed;
+  if (lastT === null) {
+    buildGrid(now);
+    if (query.get('start') === 'pattern') { phase = 'time'; phaseEnd = now; }
+    else showTime(now);
+    elapsed = Math.max(0, Math.min(+query.get('warp') || 0, 600));
+  } else {
+    elapsed = Math.min(t - lastT, 3);
+  }
+  lastT = t;
+
+  const steps = Math.ceil(elapsed * 60), dt = steps ? elapsed / steps : 0;
+  for (let i = 0; i < steps; i++) {
+    now += dt;
+    advance(now);
+    for (const c of clocks) {
+      if (c.next && now >= c.switchAt) { c.fn = c.next; c.next = null; }
+      const [h, m] = c.fn(c, now);
+      c.h.step(h, dt); c.m.step(m, dt);
+    }
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ─── Controls ────────────────────────────────────────────────────────
+// Move the pointer to reveal them; P, G, S and A cycle each variety.
+const panelEl = document.getElementById('panel');
+function choose(k, v) {
+  settings[k] = v;
+  try { localStorage.setItem('tessera', JSON.stringify(settings)); } catch (e) {}
+  renderPanel();
+  document.body.style.background = opt('surface').wall;
+  if (lastT === null) return;
+  if (k === 'shape') resolveShape();
+  if (k === 'grid' || k === 'shape') { buildGrid(now); showTime(now); }
+}
+function renderPanel() {
+  panelEl.textContent = '';
+  for (const k in VARIETIES) {
+    const group = document.createElement('div'); group.className = 'group';
+    const name = document.createElement('span'); name.className = 'name'; name.textContent = VARIETIES[k].label;
+    group.append(name);
+    for (const v in VARIETIES[k].options) {
+      const b = document.createElement('button');
+      b.textContent = VARIETIES[k].options[v].label;
+      b.setAttribute('aria-pressed', settings[k] === v);
+      b.onclick = () => choose(k, v);
+      group.append(b);
+    }
+    panelEl.append(group);
+  }
+}
+let hideTimer = 0;
+function reveal() {
+  document.body.classList.add('ui');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => document.body.classList.remove('ui'), 2600);
+}
+window.addEventListener('pointermove', reveal);
+window.addEventListener('pointerdown', reveal);
+window.addEventListener('keydown', e => {
+  for (const k in VARIETIES) {
+    if (e.key.toLowerCase() !== VARIETIES[k].key) continue;
+    const names = Object.keys(VARIETIES[k].options);
+    choose(k, names[(names.indexOf(settings[k]) + 1) % names.length]);
+    reveal();
+  }
+});
+
+resize();
+renderPanel();
+document.body.style.background = opt('surface').wall;
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

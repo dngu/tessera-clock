@@ -1,0 +1,9 @@
+# Build output
+.build/
+TesseraClock.saver/
+*.saver
+
+# Local Claude Code settings
+.claude/
+
+.DS_Store
