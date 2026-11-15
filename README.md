@@ -4,6 +4,17 @@ A kinetic clock: a grid of small analogue clocks whose hands move together
 through radial bursts, concentric rings and rolling waves, then gather to spell
 the time.
 
+## Install (macOS screensaver)
+
+Open **Terminal**, paste this line and press Return:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dngu/tessera-clock/main/install.sh | bash
+```
+
+When Screen Saver settings opens, pick **Tessera Clock**. To update later, run
+the same line again.
+
 Two shapes, alternating each time it starts:
 
 - **Round** — a disc of clocks; the time appears as thin, broken line numerals
