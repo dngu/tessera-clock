@@ -26,10 +26,15 @@ Options can also go in the address, e.g. `index.html?shape=panel&surface=plaster
 
 ## macOS screensaver
 
+One line in Terminal:
+
 ```sh
-./build-saver.sh          # builds TesseraClock.saver
-open TesseraClock.saver   # installs it
+curl -fsSL https://raw.githubusercontent.com/dngu/tessera-clock/main/install.sh | bash
 ```
+
+Or from a clone, run `./install.sh`. It builds the screensaver on your Mac
+(it needs Apple's command line tools and offers to install them), copies it to
+`~/Library/Screen Savers`, and opens Screen Saver settings. Run it again to update.
 
 Then choose **Tessera Clock** in System Settings → Screen Saver. **Options…**
 offers the same choices. The clock dims when you move the mouse or type, so the

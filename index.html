@@ -144,12 +144,13 @@ resolveShape();
 // Block numerals: solid seven-segment shapes on a 3×5 bitmap, drawn as the
 // outline of the filled blocks. The bitmap's corners are the clock centres,
 // so each numeral is 4 × 6 clocks and every hand is horizontal or vertical.
-const BLOCKS = [
+const BLOCK_BITMAPS = [
   ['111','101','101','101','111'], ['001','001','001','001','001'], ['111','001','111','100','111'],
   ['111','001','111','001','111'], ['101','101','111','001','001'], ['111','100','111','001','111'],
   ['111','100','111','101','111'], ['111','001','001','001','001'], ['111','101','111','101','111'],
   ['111','101','111','001','111'],
-].map(bitmap => {
+];
+const BLOCKS = BLOCK_BITMAPS.map(bitmap => {
   const on = (r, c) => r >= 0 && r < 5 && c >= 0 && c < 3 && bitmap[r][c] === '1';
   const out = [];
   for (let r = 0; r < 6; r++) {
@@ -164,6 +165,11 @@ const BLOCKS = [
     }
   }
   return out;
+});
+// Each numeral's first inked clock column and width in clocks.
+const BLOCK_SPAN = BLOCK_BITMAPS.map((_, d) => {
+  const cols = [0, 1, 2].filter(c => [0,1,2,3,4].some(r => BLOCK_BITMAPS[d][r][c] === '1'));
+  return [cols[0], cols[cols.length - 1] - cols[0] + 2];
 });
 const PANEL = { rows: 8, digitColumns: [0, 5, 10, 15], digitsWidth: 19, minCols: 21, handLen: 0.47 };
 function panelCols() {
@@ -261,12 +267,21 @@ function timeString() {
 // every other clock keeps to the resting pattern.
 function timeMovement(str) {
   if (panel) {
-    const cells = new Map(), left = (COLS - PANEL.digitsWidth) / 2, n = COLS;
+    // Pack numerals by their inked width (a 1 is narrow), one clock apart and
+    // two between hours and minutes, then centre the group.
+    const cells = new Map(), n = COLS, starts = [];
+    let x = 0;
+    for (let i = 0; i < 4; i++) {
+      const [a, w] = BLOCK_SPAN[str[i]];
+      starts.push(x - a);
+      x += w + (i === 1 ? 2 : 1);
+    }
+    const left = Math.round((COLS - (x - 1)) / 2);
     for (let i = 0; i < 4; i++) {
       const digit = BLOCKS[str[i]];
       for (let r = 0; r < 6; r++)
         for (let k = 0; k < 4; k++)
-          if (digit[r][k]) cells.set((1 + r) * n + left + PANEL.digitColumns[i] + k, digit[r][k]);
+          if (digit[r][k]) cells.set((1 + r) * n + left + starts[i] + k, digit[r][k]);
     }
     return (c, t) => cells.get(c.gy * n + c.gx) || rest(c, t);
   }

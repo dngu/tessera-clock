@@ -77,6 +77,10 @@ private let blockDigits: [[[(CGFloat, CGFloat)?]]] = blockBitmaps.map { bitmap i
         }
     }
 }
+private let blockSpans: [(Int, Int)] = blockBitmaps.map { bitmap in
+    let inked = (0..<3).filter { c in bitmap.contains { Array($0)[c] == "1" } }
+    return (inked.first!, inked.last! - inked.first! + 2)
+}
 private enum Panel {
     static let rows = 8                       // 6-clock numerals with a row above and below
     static let digitColumns = [0, 5, 10, 15]  // 4-clock numerals, one clock apart
@@ -331,12 +335,21 @@ final class TesseraClockView: ScreenSaverView {
         var cells: [Int: (CGFloat, CGFloat)] = [:]
         let n = cols
         if panel {
-            let left = (cols - Panel.digitsWidth) / 2, top = 1
-            for (i, ch) in str.enumerated() {
-                let digit = blockDigits[ch.wholeNumberValue ?? 0]
+            // Pack numerals by inked width (a 1 is narrow), one clock apart and
+            // two between hours and minutes, then centre the group.
+            let ds = str.map { $0.wholeNumberValue ?? 0 }
+            var starts: [Int] = [], x = 0
+            for (i, d) in ds.enumerated() {
+                let (a, w) = blockSpans[d]
+                starts.append(x - a)
+                x += w + (i == 1 ? 2 : 1)
+            }
+            let left = Int((Double(cols - (x - 1)) / 2).rounded()), top = 1
+            for (i, d) in ds.enumerated() {
+                let digit = blockDigits[d]
                 for r in 0..<6 {
                     for k in 0..<4 {
-                        if let pair = digit[r][k] { cells[(top + r) * n + left + Panel.digitColumns[i] + k] = pair }
+                        if let pair = digit[r][k] { cells[(top + r) * n + left + starts[i] + k] = pair }
                     }
                 }
             }
